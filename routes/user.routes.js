@@ -1,10 +1,12 @@
 import express from "express";
+import jwt from 'jsonwebtoken'
 import db from "../db/index.js"
-import { userTable } from "../models/user.models.js";
+import { userTable } from "../models/user.model.js";
 import { eq } from "drizzle-orm";
-import { createHmac, randomBytes } from "crypto";
-import { signupPostRequestBodySchema } from "../validation/request.validation.js";
-import { error } from "console";
+import { hashPasswordWithSalt } from "../utils/hash.js";
+import { loginPostRequestBodySchema, signupPostRequestBodySchema } from "../validation/request.validation.js";
+import { createNewUser, getUserByEmail } from "../services/user.service.js";
+import { createUserToken } from "../utils/token.js";
 
 const router = express.Router();
 
@@ -12,7 +14,6 @@ const router = express.Router();
 
 router.post('/signup', async (req, res) => {
 
-    console.log(req.body);
     const validationResult = await signupPostRequestBodySchema.safeParseAsync(
         req.body
     );
@@ -22,29 +23,56 @@ router.post('/signup', async (req, res) => {
     }
     const {firstname, lastname, email, password} = validationResult.data;
 
-    const [existingUser] = await db.select({
-        id: userTable.id
-    })
-    .from(userTable)
-    .where(eq(userTable.email, email));
+    const existingUser = await getUserByEmail(email);
 
     if(existingUser){
-        return res.status(400).json({error: `user with this email ${email} doesn't exist`})
+        return res.status(400).json({error: `user with this email ${email} already exist`})
     }
 
-    const salt = randomBytes(256).toString('hex');
+    const {hashedPassword, salt} = hashPasswordWithSalt(password);
 
-    const hashedPassword = createHmac('sha256', salt).update(password).digest('hex');
-
-    const [user] = await db.insert(userTable).values({
-        firstname,
+    const userData = {
+       firstname,
         lastname,
         email,
         salt,
         password: hashedPassword
-    }).returning({id: userTable.id})
+    }
+    const user = await createNewUser(userData);
 
     return res.status(201).json({data: {userId: user.id}});
+})
+
+
+//login route
+
+router.post('/login',async (req, res) => {
+    const validationResult = await loginPostRequestBodySchema.safeParseAsync(
+        req.body
+    )
+
+    if(validationResult.error){
+       return res.status(400).json({error: validationResult.error.message})
+    }
+
+    const {email, password} = validationResult.data;
+
+    const user = await getUserByEmail(email);
+
+    if(!user){
+        return res.status(400).json({error: `user with email ${email} doesn't exists`});
+    }
+
+    const {salt, hashedPassword} = hashPasswordWithSalt(password, user.salt);
+
+    if(hashedPassword!==user.password){
+        return res.status(400).json({error: 'the password is invalid'})
+    }
+
+    const token = await createUserToken({id: user.id});
+    
+    return res.json({ token })
+
 })
 
 export default router;
